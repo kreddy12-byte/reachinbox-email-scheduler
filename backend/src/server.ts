@@ -35,6 +35,9 @@ async function bootstrap(): Promise<void> {
 
   const app = express();
 
+  // Render (and other reverse proxies) terminate TLS; needed for secure cookies.
+  app.set('trust proxy', 1);
+
   setupBullBoard(app);
 
   app.use(

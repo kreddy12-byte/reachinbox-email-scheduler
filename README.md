@@ -262,7 +262,83 @@ Configure all env vars for production hosts. Set:
 - Matching `FRONTEND_URL`, Google/Slack callback URLs
 - CORS already allows `FRONTEND_URL` with credentials
 
-For cross-site cookies (`frontend` and API on different sites), you may need `sameSite: 'none'` + HTTPS — not enabled by default.
+On Render, production cookies use `SameSite=None` + `Secure` (with `trust proxy`) so the static frontend can call the API with credentials across `*.onrender.com` subdomains.
+
+## Render Deployment
+
+This repo includes a Render Blueprint at `render.yaml`.
+
+### Services created by the Blueprint
+
+| Resource | Render type | Role |
+| --- | --- | --- |
+| `reachinbox-db` | PostgreSQL | Prisma / app data |
+| `reachinbox-redis` | Key Value (Redis) | BullMQ + rate limits (`noeviction`) |
+| `reachinbox-elasticsearch` | Private Docker service | Search index (persistent disk) |
+| `reachinbox-api` | Web (Node) | Express API + Prisma migrate on deploy |
+| `reachinbox-worker` | Background Worker (Node) | BullMQ email worker (`npm run worker:start`) |
+| `reachinbox-frontend` | Static site | Vite `dist/` build |
+
+Local `docker-compose.yml` is unchanged and still used for local Postgres/Redis/Elasticsearch.
+
+### Required secrets (Dashboard prompts / `sync: false`)
+
+Set these in Render when the Blueprint asks (never commit them):
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `SLACK_CLIENT_ID`
+- `SLACK_CLIENT_SECRET`
+- `SLACK_CHANNEL_ID`
+- `ETHEREAL_USER`
+- `ETHEREAL_PASSWORD`
+
+`SESSION_SECRET` is auto-generated for the API. `DATABASE_URL` and `REDIS_URL` are wired from managed services. `ELASTICSEARCH_URL` uses the private service hostname `http://reachinbox-elasticsearch:9200`.
+
+### Public URLs (defaults from service names)
+
+After deploy, Render assigns:
+
+- Frontend: `https://reachinbox-frontend.onrender.com`
+- API: `https://reachinbox-api.onrender.com`
+- Bull Board: `https://reachinbox-api.onrender.com/admin/queues`
+
+If Render appends a suffix to a service URL, update:
+
+- API env: `FRONTEND_URL`, `GOOGLE_CALLBACK_URL`, `SLACK_REDIRECT_URI`
+- Frontend build env: `VITE_API_URL`
+- Then **clear build cache / redeploy frontend** so Vite rebuilds with the correct API URL.
+
+### OAuth callback URLs to configure after deploy
+
+**Google Cloud Console** authorized redirect URI:
+
+`https://reachinbox-api.onrender.com/api/auth/google/callback`
+
+**Slack app** redirect URL:
+
+`https://reachinbox-api.onrender.com/api/slack/oauth/callback`
+
+Also invite the Slack bot into your notify channel.
+
+### Deploy steps (in order)
+
+1. Push this repo to GitHub (if not already).
+2. In Render: **New → Blueprint** → select the repo → confirm `render.yaml`.
+3. Enter the `sync: false` secrets when prompted.
+4. Apply the Blueprint and wait for Postgres, Redis, Elasticsearch, API, worker, and frontend to become healthy.
+5. Copy the live API and frontend URLs from the Render dashboard.
+6. If URLs differ from the defaults above, update env vars and redeploy API + frontend.
+7. Update Google and Slack OAuth redirect URLs to the live API callbacks.
+8. Open the frontend URL, sign in with Google, connect Slack, and run a small schedule smoke test.
+9. Confirm the worker is running (emails leave `SCHEDULED`) and Bull Board is reachable on the API service.
+
+### Notes
+
+- Only the **API** runs `prisma migrate deploy` (`preDeployCommand`). The worker does not migrate.
+- Frontend `VITE_API_URL` is a **build-time** variable.
+- Elasticsearch private service needs a plan with enough RAM (Blueprint uses `standard` + 512MB JVM heap).
+- Keep the Slack bot invited to the configured channel so rate-limit notifications deliver.
 
 ## Security
 
@@ -271,6 +347,7 @@ For cross-site cookies (`frontend` and API on different sites), you may need `sa
 - Slack tokens, Google secrets, and Ethereal passwords never leave the backend
 - Frontend only receives Slack status (connected / team / channel id), never tokens
 - Auth is session-based; email APIs require `requireAuth`
+- `render.yaml` contains no credential values (`sync: false` / `generateValue` / service references only)
 
 ## Known Limitations
 
@@ -280,3 +357,4 @@ For cross-site cookies (`frontend` and API on different sites), you may need `sa
 - Strict global send ordering across distributed workers is best-effort, not guaranteed
 - Slack bot must be invited to the notify channel (`chat:write` alone cannot join without extra scopes)
 - Elasticsearch failures do not block scheduling/sending
+- Render Elasticsearch is a self-managed Docker private service (not a managed ES product)

@@ -1,16 +1,29 @@
 import { env } from './env.js';
 
-function resolveRedisConnection(): {
+export function resolveRedisConnection(): {
   host: string;
   port: number;
+  username?: string;
+  password?: string;
+  tls?: object;
   maxRetriesPerRequest: null;
 } {
   if (env.REDIS_URL) {
     try {
       const parsed = new URL(env.REDIS_URL);
+      const username = parsed.username
+        ? decodeURIComponent(parsed.username)
+        : undefined;
+      const password = parsed.password
+        ? decodeURIComponent(parsed.password)
+        : undefined;
+
       return {
         host: parsed.hostname || env.REDIS_HOST,
         port: parsed.port ? Number(parsed.port) : env.REDIS_PORT,
+        ...(username ? { username } : {}),
+        ...(password ? { password } : {}),
+        ...(parsed.protocol === 'rediss:' ? { tls: {} } : {}),
         maxRetriesPerRequest: null,
       };
     } catch {
@@ -27,7 +40,8 @@ function resolveRedisConnection(): {
 
 /**
  * Shared BullMQ / ioredis connection options.
- * Prefer REDIS_URL when set; otherwise REDIS_HOST + REDIS_PORT.
+ * Prefer REDIS_URL when set (supports password / TLS from managed Redis);
+ * otherwise REDIS_HOST + REDIS_PORT.
  * maxRetriesPerRequest must be null for BullMQ workers.
  */
 export const redisConnection = resolveRedisConnection();

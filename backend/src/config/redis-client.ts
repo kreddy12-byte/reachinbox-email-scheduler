@@ -13,6 +13,9 @@ export function getRedisClient(): Redis {
     redisClient = new Redis({
       host: redisConnection.host,
       port: redisConnection.port,
+      username: redisConnection.username,
+      password: redisConnection.password,
+      tls: redisConnection.tls,
       maxRetriesPerRequest: null,
     });
 

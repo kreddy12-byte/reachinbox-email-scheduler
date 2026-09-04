@@ -1,0 +1,179 @@
+# ReachInbox Email Scheduler — Render Blueprint
+# https://render.com/docs/blueprint-spec
+#
+# Secrets use sync: false (set in the Render Dashboard) or generateValue.
+# Never commit real credentials to this file.
+
+databases:
+  - name: reachinbox-db
+    plan: basic-256mb
+    databaseName: reachinbox
+    user: reachinbox
+    ipAllowList: [] # private network only
+
+envVarGroups:
+  - name: reachinbox-secrets
+    envVars:
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: SLACK_CHANNEL_ID
+        sync: false
+      - key: ETHEREAL_USER
+        sync: false
+      - key: ETHEREAL_PASSWORD
+        sync: false
+
+services:
+  # Redis-compatible Key Value (BullMQ + rate limits). noeviction required for queues.
+  - type: keyvalue
+    name: reachinbox-redis
+    plan: starter
+    maxmemoryPolicy: noeviction
+    ipAllowList: [] # private network only
+
+  # Elasticsearch as a private Docker service with persistent disk
+  - type: pserv
+    name: reachinbox-elasticsearch
+    runtime: docker
+    plan: standard
+    dockerfilePath: ./elasticsearch/Dockerfile
+    dockerContext: ./elasticsearch
+    disk:
+      name: reachinbox-es-data
+      mountPath: /usr/share/elasticsearch/data
+      sizeGB: 10
+    envVars:
+      - key: PORT
+        value: "9200"
+      - key: discovery.type
+        value: single-node
+      - key: xpack.security.enabled
+        value: "false"
+      - key: xpack.security.http.ssl.enabled
+        value: "false"
+      - key: ES_JAVA_OPTS
+        value: "-Xms512m -Xmx512m"
+      - key: network.host
+        value: "0.0.0.0"
+
+  # Express API
+  - type: web
+    name: reachinbox-api
+    runtime: node
+    plan: starter
+    rootDir: backend
+    buildCommand: npm install && npx prisma generate && npm run build
+    preDeployCommand: npx prisma migrate deploy
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - fromGroup: reachinbox-secrets
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reachinbox-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: reachinbox-redis
+          type: keyvalue
+          property: connectionString
+      # Private-network URL (service name + port). Not a secret.
+      - key: ELASTICSEARCH_URL
+        value: http://reachinbox-elasticsearch:9200
+      - key: ELASTICSEARCH_INDEX
+        value: emails
+      # Public frontend URL — update if you rename the static site service.
+      - key: FRONTEND_URL
+        value: https://reachinbox-frontend.onrender.com
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GOOGLE_CALLBACK_URL
+        value: https://reachinbox-api.onrender.com/api/auth/google/callback
+      - key: SLACK_REDIRECT_URI
+        value: https://reachinbox-api.onrender.com/api/slack/oauth/callback
+      - key: ETHEREAL_HOST
+        value: smtp.ethereal.email
+      - key: ETHEREAL_PORT
+        value: "587"
+      - key: EMAIL_MIN_DELAY_MS
+        value: "2000"
+      - key: MAX_EMAILS_PER_HOUR
+        value: "200"
+      - key: WORKER_CONCURRENCY
+        value: "5"
+      - key: EMAIL_JOB_ATTEMPTS
+        value: "3"
+      - key: EMAIL_JOB_BACKOFF_MS
+        value: "5000"
+
+  # BullMQ email worker (separate process; does not run migrations)
+  - type: worker
+    name: reachinbox-worker
+    runtime: node
+    plan: starter
+    rootDir: backend
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: npm run worker:start
+    envVars:
+      - fromGroup: reachinbox-secrets
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reachinbox-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: reachinbox-redis
+          type: keyvalue
+          property: connectionString
+      - key: ELASTICSEARCH_URL
+        value: http://reachinbox-elasticsearch:9200
+      - key: ELASTICSEARCH_INDEX
+        value: emails
+      - key: FRONTEND_URL
+        value: https://reachinbox-frontend.onrender.com
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GOOGLE_CALLBACK_URL
+        value: https://reachinbox-api.onrender.com/api/auth/google/callback
+      - key: SLACK_REDIRECT_URI
+        value: https://reachinbox-api.onrender.com/api/slack/oauth/callback
+      - key: ETHEREAL_HOST
+        value: smtp.ethereal.email
+      - key: ETHEREAL_PORT
+        value: "587"
+      - key: EMAIL_MIN_DELAY_MS
+        value: "2000"
+      - key: MAX_EMAILS_PER_HOUR
+        value: "200"
+      - key: WORKER_CONCURRENCY
+        value: "5"
+      - key: EMAIL_JOB_ATTEMPTS
+        value: "3"
+      - key: EMAIL_JOB_BACKOFF_MS
+        value: "5000"
+
+  # React static frontend
+  - type: web
+    name: reachinbox-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      # Bake public API URL into the Vite build. Update if the API service URL differs.
+      - key: VITE_API_URL
+        value: https://reachinbox-api.onrender.com

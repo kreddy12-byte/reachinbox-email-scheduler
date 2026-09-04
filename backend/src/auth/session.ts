@@ -16,8 +16,10 @@ export function createSessionMiddleware() {
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
+      // Production frontend and API are separate origins on Render;
+      // SameSite=None is required for credentialed cross-origin fetches.
       secure: isProduction,
-      sameSite: 'lax',
+      sameSite: isProduction ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     },
   });
