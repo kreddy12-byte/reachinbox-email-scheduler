@@ -1,0 +1,44 @@
+@import 'tailwindcss';
+
+:root {
+  --ri-bg: #eef2f6;
+  --ri-bg-accent: #e4ebf3;
+  --ri-surface: #ffffff;
+  --ri-ink: #0f172a;
+  --ri-muted: #64748b;
+  --ri-border: #dbe3ee;
+  --ri-primary: #0f766e;
+  --ri-primary-hover: #0d9488;
+  --ri-primary-ink: #ffffff;
+  --ri-danger: #b91c1c;
+  --ri-warn: #b45309;
+  --ri-ok: #047857;
+  --ri-shadow: 0 1px 2px rgb(15 23 42 / 0.04), 0 8px 24px rgb(15 23 42 / 0.06);
+  --ri-radius: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  color: var(--ri-ink);
+  background:
+    radial-gradient(1200px 500px at 10% -10%, #d9e8ef 0%, transparent 55%),
+    radial-gradient(900px 420px at 95% 0%, #dfe8f4 0%, transparent 50%),
+    var(--ri-bg);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}

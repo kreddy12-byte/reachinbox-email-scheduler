@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "emails" ADD COLUMN     "hourlyLimit" INTEGER NOT NULL DEFAULT 200,
+ADD COLUMN     "sendDelayMs" INTEGER NOT NULL DEFAULT 2000;
