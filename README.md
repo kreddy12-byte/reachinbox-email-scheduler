@@ -99,30 +99,47 @@ Frontend: `VITE_API_URL` (default `http://localhost:3001`)
 - Hourly limit: count of SENT/PROCESSING in the current UTC hour; denied emails return to `SCHEDULED` at the next UTC hour
 - Min delay: per-sender `sender_send_slots` table
 
-## Free Deployment (Render Blueprint)
+## Deployment (Railway — preferred)
 
-`render.yaml` creates:
+Config files:
 
-| Resource | Plan | Role |
-| --- | --- | --- |
-| `reachinbox-db` | Free Postgres | App data (expires after 30 days on free) |
-| `reachinbox-api` | Free web | Express + poller |
-| `reachinbox-frontend` | Static | Vite `dist/` |
+- `backend/railway.toml` — API + Prisma migrate + in-process poller
+- `frontend/railway.toml` — Vite build + `serve` static host
 
 ### Steps
 
-1. Push this repo to GitHub
-2. Render → **New → Blueprint** → select the repo
-3. Enter Google (and optional Slack) secrets when prompted
-4. After deploy, set Google redirect URI to:
-   `https://<api-host>/api/auth/google/callback`
-5. Open the frontend URL and sign in
+1. Create a Railway project from this GitHub repo (or `railway login` + `railway init`)
+2. Add a **PostgreSQL** plugin; link `DATABASE_URL` to the API service
+3. Create two services from the same repo:
+   - **API** — Root Directory `/backend`
+   - **Frontend** — Root Directory `/frontend`
+4. API variables:
+
+   | Key | Value |
+   | --- | --- |
+   | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
+   | `FRONTEND_URL` | `https://${{Frontend.RAILWAY_PUBLIC_DOMAIN}}` |
+   | `GOOGLE_CALLBACK_URL` | `https://${{RAILWAY_PUBLIC_DOMAIN}}/api/auth/google/callback` |
+   | `SLACK_REDIRECT_URI` | `https://${{RAILWAY_PUBLIC_DOMAIN}}/api/slack/oauth/callback` |
+   | `SESSION_SECRET` | long random string |
+   | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | from Google Cloud |
+   | `NODE_ENV` | `production` |
+
+5. Frontend build variable:
+
+   | Key | Value |
+   | --- | --- |
+   | `VITE_API_URL` | `https://${{API.RAILWAY_PUBLIC_DOMAIN}}` |
+
+6. Generate public domains for both services
+7. Update Google (and Slack) OAuth redirect URLs to the live API callbacks
+
+`render.yaml` remains as an alternate free Render Blueprint (API sleeps when idle).
 
 **Notes**
 
-- Free API sleeps after ~15 minutes idle; the poller pauses until the next request wakes it
-- Free hosts often block SMTP port 587 — the API then uses **simulated sends** (status still becomes `SENT`)
-- Prefer [Neon](https://neon.tech) free Postgres if you need a DB that does not expire in 30 days (set `DATABASE_URL` manually)
+- Railway uses trial/usage credits (not forever-$0)
+- If SMTP port 587 is blocked, the API uses **simulated sends** (status still `SENT`)
 
 ## Security
 

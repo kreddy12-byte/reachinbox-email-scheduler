@@ -1,0 +1,4 @@
+# Optional root hint for Railway monorepo imports.
+# Prefer creating two services with root directories /backend and /frontend.
+[build]
+builder = "NIXPACKS"
