@@ -17,6 +17,7 @@ function loadBackendEnv(): void {
 }
 
 loadBackendEnv();
+
 function requireEnv(key: string, fallback?: string): string {
   const value = process.env[key] ?? fallback;
   if (value === undefined || value === '') {
@@ -43,11 +44,6 @@ function requirePositiveInt(key: string, fallback: string): number {
 
 export const env = {
   DATABASE_URL: requireEnv('DATABASE_URL'),
-  REDIS_URL: process.env.REDIS_URL ?? '',
-  REDIS_HOST: requireEnv('REDIS_HOST', 'localhost'),
-  REDIS_PORT: Number(requireEnv('REDIS_PORT', '6379')),
-  ELASTICSEARCH_URL: requireEnv('ELASTICSEARCH_URL', 'http://localhost:9200'),
-  ELASTICSEARCH_INDEX: requireEnv('ELASTICSEARCH_INDEX', 'emails'),
   PORT: Number(requireEnv('PORT', '3001')),
   FRONTEND_URL: requireEnv('FRONTEND_URL', 'http://localhost:5173'),
   SESSION_SECRET: requireEnv('SESSION_SECRET', 'dev-session-secret-change-me'),
@@ -59,13 +55,14 @@ export const env = {
   ),
   ETHEREAL_HOST: requireEnv('ETHEREAL_HOST', 'smtp.ethereal.email'),
   ETHEREAL_PORT: Number(requireEnv('ETHEREAL_PORT', '587')),
-  ETHEREAL_USER: requireEnv('ETHEREAL_USER'),
-  ETHEREAL_PASSWORD: requireEnv('ETHEREAL_PASSWORD'),
+  // Optional at boot — createTestAccount can fill these when empty.
+  ETHEREAL_USER: process.env.ETHEREAL_USER ?? '',
+  ETHEREAL_PASSWORD: process.env.ETHEREAL_PASSWORD ?? '',
   EMAIL_MIN_DELAY_MS: requireNonNegativeInt('EMAIL_MIN_DELAY_MS', '2000'),
   MAX_EMAILS_PER_HOUR: requirePositiveInt('MAX_EMAILS_PER_HOUR', '200'),
-  WORKER_CONCURRENCY: requirePositiveInt('WORKER_CONCURRENCY', '5'),
+  EMAIL_POLL_INTERVAL_MS: requirePositiveInt('EMAIL_POLL_INTERVAL_MS', '3000'),
+  EMAIL_POLL_BATCH_SIZE: requirePositiveInt('EMAIL_POLL_BATCH_SIZE', '5'),
   EMAIL_JOB_ATTEMPTS: requirePositiveInt('EMAIL_JOB_ATTEMPTS', '3'),
-  EMAIL_JOB_BACKOFF_MS: requirePositiveInt('EMAIL_JOB_BACKOFF_MS', '5000'),
   SLACK_CLIENT_ID: process.env.SLACK_CLIENT_ID ?? '',
   SLACK_CLIENT_SECRET: process.env.SLACK_CLIENT_SECRET ?? '',
   SLACK_REDIRECT_URI: requireEnv(
@@ -73,4 +70,11 @@ export const env = {
     'http://localhost:3001/api/slack/oauth/callback',
   ),
   SLACK_CHANNEL_ID: process.env.SLACK_CHANNEL_ID ?? '',
+  NODE_ENV: process.env.NODE_ENV ?? 'development',
 } as const;
+
+/** Mutable SMTP credentials (may be filled by createTestAccount at startup). */
+export const smtpCredentials = {
+  user: env.ETHEREAL_USER,
+  pass: env.ETHEREAL_PASSWORD,
+};

@@ -1,7 +1,5 @@
 import type { Request, Response } from 'express';
-import { getRedisClient } from '../config/redis-client.js';
 import { prisma } from '../db/prisma.js';
-import { pingElasticsearch } from '../elasticsearch/elasticsearch.client.js';
 
 async function checkDatabase(): Promise<'ok' | 'error'> {
   try {
@@ -12,31 +10,15 @@ async function checkDatabase(): Promise<'ok' | 'error'> {
   }
 }
 
-async function checkRedis(): Promise<'ok' | 'error'> {
-  try {
-    const result = await getRedisClient().ping();
-    return result === 'PONG' ? 'ok' : 'error';
-  } catch {
-    return 'error';
-  }
-}
-
 export async function getHealth(_req: Request, res: Response): Promise<void> {
-  const [database, redis, elasticsearch] = await Promise.all([
-    checkDatabase(),
-    checkRedis(),
-    pingElasticsearch().then((ok) => (ok ? 'ok' : 'error') as 'ok' | 'error'),
-  ]);
+  const database = await checkDatabase();
+  const ok = database === 'ok';
 
-  // Elasticsearch outage must not fail the overall app health check.
-  const criticalOk = database === 'ok' && redis === 'ok';
-
-  res.status(criticalOk ? 200 : 503).json({
-    status: criticalOk ? 'ok' : 'degraded',
+  res.status(ok ? 200 : 503).json({
+    status: ok ? 'ok' : 'degraded',
     services: {
       database,
-      redis,
-      elasticsearch,
+      poller: 'ok',
     },
   });
 }

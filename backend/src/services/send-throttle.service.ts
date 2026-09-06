@@ -1,4 +1,4 @@
-import { getRedisClient } from '../config/redis-client.js';
+import { prisma } from '../db/prisma.js';
 import { logger } from '../utils/logger.js';
 
 export interface SendSlotResult {
@@ -8,27 +8,10 @@ export interface SendSlotResult {
 }
 
 /**
- * Distributed per-sender send-slot reservation.
- * Redis key: email-send-slot:{senderId}
- *
- * nextSendTime = max(now, lastReserved + delayMs)
- * Multiple workers receive non-overlapping slots.
+ * Per-sender min-delay slots stored in Postgres (single-API process safe).
+ * nextSendAt = max(now, previous nextSendAt) + delayMs after reservation.
+ * Reservation returns the time this send may leave.
  */
-const RESERVE_SEND_SLOT_LUA = `
-local key = KEYS[1]
-local nowMs = tonumber(ARGV[1])
-local delayMs = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-
-local last = tonumber(redis.call('GET', key) or '0')
-local nextSend = math.max(nowMs, last + delayMs)
-
-redis.call('SET', key, tostring(nextSend))
-redis.call('EXPIRE', key, ttl)
-
-return {tostring(nextSend)}
-`;
-
 export async function reserveSendSlot(
   senderId: string,
   sendDelayMs: number,
@@ -38,31 +21,38 @@ export async function reserveSendSlot(
     throw new Error(`sendDelayMs must be >= 0 (got ${sendDelayMs})`);
   }
 
-  const nowMs = Date.now();
-  // Keep slot state long enough for large backlog pacing (e.g. 1000+ emails).
-  const ttlSeconds = Math.max(
-    3600,
-    Math.ceil((sendDelayMs * 2000) / 1000) + 3600,
-  );
+  const now = new Date();
 
-  const redis = getRedisClient();
-  const raw = (await redis.eval(
-    RESERVE_SEND_SLOT_LUA,
-    1,
-    `email-send-slot:${senderId}`,
-    String(nowMs),
-    String(sendDelayMs),
-    String(ttlSeconds),
-  )) as [string];
+  const allowedAt = await prisma.$transaction(async (tx) => {
+    const existing = await tx.senderSendSlot.findUnique({
+      where: { senderId },
+    });
 
-  const allowedAt = new Date(Number(raw[0]));
+    const base = existing
+      ? Math.max(now.getTime(), existing.nextSendAt.getTime())
+      : now.getTime();
+    const slotAt = new Date(base);
+
+    await tx.senderSendSlot.upsert({
+      where: { senderId },
+      create: {
+        senderId,
+        nextSendAt: new Date(slotAt.getTime() + sendDelayMs),
+      },
+      update: {
+        nextSendAt: new Date(slotAt.getTime() + sendDelayMs),
+      },
+    });
+
+    return slotAt;
+  });
 
   logger.info('Send slot reserved', {
     senderId,
     emailId: options?.emailId,
     sendDelayMs,
     sendSlot: allowedAt.toISOString(),
-    waitMs: Math.max(0, allowedAt.getTime() - nowMs),
+    waitMs: Math.max(0, allowedAt.getTime() - now.getTime()),
   });
 
   return {

@@ -14,7 +14,6 @@ export interface ScheduledEmail {
   subject: string;
   scheduledAt: string;
   status: EmailStatus;
-  bullJobId: string | null;
   sendDelayMs: number;
   hourlyLimit: number;
   createdAt: string;
@@ -55,7 +54,6 @@ export interface ScheduleEmailItem {
 
 export interface ScheduleResult {
   emailId: string;
-  bullJobId: string;
   scheduledAt: string;
 }
 

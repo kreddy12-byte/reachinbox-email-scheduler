@@ -1,14 +1,13 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { env } from '../config/env.js';
-import { getRedisClient } from '../config/redis-client.js';
 import { prisma } from '../db/prisma.js';
 import { logger } from '../utils/logger.js';
-import { formatUtcHourKey, secondsUntil, startOfNextUtcHour } from '../utils/time.js';
+import { formatUtcHourKey } from '../utils/time.js';
 
 const SLACK_AUTHORIZE_URL = 'https://slack.com/oauth/v2/authorize';
 const SLACK_OAUTH_ACCESS_URL = 'https://slack.com/api/oauth.v2.access';
 const SLACK_POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage';
-const OAUTH_STATE_TTL_SECONDS = 600;
+const OAUTH_STATE_TTL_MS = 600_000;
 
 export interface SlackStatus {
   connected: boolean;
@@ -52,27 +51,35 @@ export function buildSlackAuthorizationUrl(state: string): string {
 
 export async function createSlackOAuthState(userId: string): Promise<string> {
   const state = randomBytes(32).toString('hex');
-  const redis = getRedisClient();
-  await redis.set(
-    `slack-oauth-state:${state}`,
-    userId,
-    'EX',
-    OAUTH_STATE_TTL_SECONDS,
-  );
+  const expiresAt = new Date(Date.now() + OAUTH_STATE_TTL_MS);
+
+  await prisma.slackOAuthState.create({
+    data: { state, userId, expiresAt },
+  });
+
+  // Best-effort cleanup of expired rows
+  void prisma.slackOAuthState
+    .deleteMany({ where: { expiresAt: { lt: new Date() } } })
+    .catch(() => undefined);
+
   return state;
 }
 
 export async function consumeSlackOAuthState(
   state: string,
 ): Promise<string | null> {
-  const redis = getRedisClient();
-  const key = `slack-oauth-state:${state}`;
-  const userId = await redis.get(key);
-  if (!userId) {
+  const row = await prisma.slackOAuthState.findUnique({ where: { state } });
+  if (!row) {
     return null;
   }
-  await redis.del(key);
-  return userId;
+
+  await prisma.slackOAuthState.delete({ where: { state } }).catch(() => undefined);
+
+  if (row.expiresAt.getTime() < Date.now()) {
+    return null;
+  }
+
+  return row.userId;
 }
 
 export async function exchangeSlackOAuthCode(
@@ -109,7 +116,6 @@ export async function exchangeSlackOAuthCode(
   };
 }
 
-/** Trimmed SLACK_CHANNEL_ID from env, or null when unset/blank. Never log the value. */
 export function getConfiguredSlackChannelId(): string | null {
   const trimmed = env.SLACK_CHANNEL_ID.trim();
   return trimmed.length > 0 ? trimmed : null;
@@ -163,7 +169,6 @@ export async function getSlackStatus(userId: string): Promise<SlackStatus> {
   let channelId = connection.channelId?.trim() || null;
   const envChannelId = getConfiguredSlackChannelId();
 
-  // Backfill when env was set after OAuth (or was empty at connect time).
   if (!channelId && envChannelId) {
     await prisma.slackConnection.update({
       where: { userId },
@@ -208,7 +213,6 @@ export async function postSlackMessage(input: {
   const payload = (await response.json()) as SlackPostMessageResponse;
 
   if (!payload.ok) {
-    // Surface Slack error codes only — never log tokens or channel secrets beyond ids already known.
     logger.error('Slack chat.postMessage failed', {
       slackError: payload.error ?? 'chat.postMessage_failed',
       channelConfigured: !!input.channelId?.trim(),
@@ -219,14 +223,23 @@ export async function postSlackMessage(input: {
 }
 
 /**
- * Acquire a Redis NX lock so only one worker sends Slack for this sender/hour.
+ * Acquire a Postgres unique-constraint lock so only one notify fires per sender/hour.
  */
 export async function tryAcquireSlackRateLimitNotifyLock(
   senderId: string,
 ): Promise<boolean> {
-  const now = new Date();
-  const key = `slack-rate-limit-notified:${senderId}:${formatUtcHourKey(now)}`;
-  const ttlSeconds = secondsUntil(startOfNextUtcHour(now), now) + 3600;
-  const result = await getRedisClient().set(key, '1', 'EX', ttlSeconds, 'NX');
-  return result === 'OK';
+  const hourKey = formatUtcHourKey(new Date());
+
+  try {
+    await prisma.slackRateLimitNotify.create({
+      data: {
+        id: randomUUID(),
+        senderId,
+        hourKey,
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }

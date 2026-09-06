@@ -1,38 +1,18 @@
 import { EmailStatus } from '@prisma/client';
 import { env } from '../config/env.js';
 import { prisma } from '../db/prisma.js';
-import { safeIndexEmail } from '../elasticsearch/email-search.service.js';
-import {
-  buildEmailJobId,
-  EMAIL_JOB_NAME,
-  getEmailQueue,
-} from '../queues/email.queue.js';
-import type { EmailJobData } from '../types/email-job.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 
 export interface ScheduleResult {
   emailId: string;
-  bullJobId: string;
   scheduledAt: Date;
   alreadyScheduled: boolean;
 }
 
-function isDuplicateJobError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const message = error.message.toLowerCase();
-  return (
-    message.includes('job') &&
-    (message.includes('exists') || message.includes('duplicate'))
-  );
-}
-
 /**
- * Schedule a single email as a BullMQ delayed job.
- * Idempotent: reuses existing bullJobId / deterministic job ID.
+ * Mark / verify an email is ready for the in-process poller.
+ * No external queue — due rows are picked up by scheduledAt.
  */
 export async function scheduleEmail(emailId: string): Promise<ScheduleResult> {
   const email = await prisma.email.findUnique({ where: { id: emailId } });
@@ -48,87 +28,8 @@ export async function scheduleEmail(emailId: string): Promise<ScheduleResult> {
     );
   }
 
-  if (email.bullJobId) {
-    logger.info('Email already has bullJobId; skipping job creation', {
-      emailId,
-      bullJobId: email.bullJobId,
-    });
-
-    return {
-      emailId: email.id,
-      bullJobId: email.bullJobId,
-      scheduledAt: email.scheduledAt,
-      alreadyScheduled: true,
-    };
-  }
-
-  const delayMs = email.scheduledAt.getTime() - Date.now();
-
-  if (delayMs < 0) {
-    throw new AppError(
-      `Email ${emailId} has a scheduledAt in the past and cannot be queued`,
-      400,
-    );
-  }
-
-  const bullJobId = buildEmailJobId(email.id);
-  const jobData: EmailJobData = {
+  logger.info('Email ready for poller', {
     emailId: email.id,
-    userId: email.userId,
-    senderId: email.senderId,
-  };
-
-  const queue = getEmailQueue();
-
-  try {
-    await queue.add(EMAIL_JOB_NAME, jobData, {
-      jobId: bullJobId,
-      delay: delayMs,
-    });
-  } catch (error) {
-    if (!isDuplicateJobError(error)) {
-      logger.error('Failed to enqueue email job', {
-        emailId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    }
-
-    logger.warn('BullMQ job already existed; syncing bullJobId', {
-      emailId,
-      bullJobId,
-    });
-  }
-
-  const updated = await prisma.email.updateMany({
-    where: { id: email.id, bullJobId: null },
-    data: { bullJobId },
-  });
-
-  if (updated.count === 0) {
-    const current = await prisma.email.findUnique({ where: { id: email.id } });
-
-    if (!current?.bullJobId) {
-      await prisma.email.update({
-        where: { id: email.id },
-        data: { bullJobId },
-      });
-    }
-
-    const synced = await prisma.email.findUniqueOrThrow({ where: { id: email.id } });
-
-    return {
-      emailId: synced.id,
-      bullJobId: synced.bullJobId!,
-      scheduledAt: synced.scheduledAt,
-      alreadyScheduled: true,
-    };
-  }
-
-  logger.info('Scheduled email job', {
-    emailId: email.id,
-    bullJobId,
-    delayMs,
     scheduledAt: email.scheduledAt.toISOString(),
     sendDelayMs: email.sendDelayMs,
     hourlyLimit: email.hourlyLimit,
@@ -136,9 +37,8 @@ export async function scheduleEmail(emailId: string): Promise<ScheduleResult> {
 
   return {
     emailId: email.id,
-    bullJobId,
     scheduledAt: email.scheduledAt,
-    alreadyScheduled: false,
+    alreadyScheduled: true,
   };
 }
 
@@ -146,11 +46,9 @@ export async function scheduleEmails(
   emailIds: string[],
 ): Promise<ScheduleResult[]> {
   const results: ScheduleResult[] = [];
-
   for (const emailId of emailIds) {
     results.push(await scheduleEmail(emailId));
   }
-
   return results;
 }
 
@@ -166,8 +64,7 @@ export interface CreateAndScheduleInput {
 }
 
 /**
- * Create SCHEDULED email rows then enqueue delayed BullMQ jobs.
- * Inserts in array order so equal scheduledAt values keep creation order.
+ * Persist SCHEDULED emails; the API poller sends them when due.
  */
 export async function createAndScheduleEmails(
   inputs: CreateAndScheduleInput[],
@@ -190,17 +87,11 @@ export async function createAndScheduleEmails(
     ),
   );
 
-  const results = await scheduleEmails(created.map((email) => email.id));
-
-  // Elasticsearch is best-effort; PostgreSQL + BullMQ already succeeded.
-  for (const email of created) {
-    const fresh = await prisma.email.findUnique({ where: { id: email.id } });
-    if (fresh) {
-      await safeIndexEmail(fresh);
-    }
-  }
-
-  return results;
+  return created.map((email) => ({
+    emailId: email.id,
+    scheduledAt: email.scheduledAt,
+    alreadyScheduled: false,
+  }));
 }
 
 export function resolveScheduleDefaults(input: {

@@ -1,11 +1,8 @@
-import { getRedisClient } from '../config/redis-client.js';
+import { EmailStatus } from '@prisma/client';
+import { prisma } from '../db/prisma.js';
 import { notifyHourlyLimitReached } from '../slack/slack-notification.service.js';
 import { logger } from '../utils/logger.js';
-import {
-  formatUtcHourKey,
-  secondsUntil,
-  startOfNextUtcHour,
-} from '../utils/time.js';
+import { formatUtcHourKey, startOfNextUtcHour } from '../utils/time.js';
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -16,41 +13,26 @@ export interface RateLimitResult {
   windowKey: string;
 }
 
-/**
- * Atomic check-and-increment for per-sender hourly limits.
- * Redis key: email-rate:{senderId}:{YYYYMMDDHH} (UTC)
- *
- * Lua guarantees no concurrent workers can exceed the limit.
- */
-const CHECK_AND_RESERVE_LUA = `
-local key = KEYS[1]
-local limit = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
-local nextWindowMs = ARGV[3]
-
-local current = tonumber(redis.call('GET', key) or '0')
-
-if current >= limit then
-  return {0, current, 0, nextWindowMs}
-end
-
-local newCount = redis.call('INCR', key)
-if newCount == 1 then
-  redis.call('EXPIRE', key, ttl)
-end
-
-local remaining = limit - newCount
-if remaining < 0 then
-  remaining = 0
-end
-
-return {1, newCount, remaining, '0'}
-`;
-
-function buildRateKey(senderId: string, now: Date): string {
-  return `email-rate:${senderId}:${formatUtcHourKey(now)}`;
+function utcHourBounds(now: Date): { start: Date; end: Date } {
+  const start = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      now.getUTCHours(),
+      0,
+      0,
+      0,
+    ),
+  );
+  const end = startOfNextUtcHour(now);
+  return { start, end };
 }
 
+/**
+ * Postgres hourly limit: count SENT (by sentAt) + other PROCESSING rows this UTC hour.
+ * `excludeEmailId` is the email currently being processed (already claimed).
+ */
 export async function checkAndReserveSend(
   senderId: string,
   hourlyLimit: number,
@@ -62,36 +44,39 @@ export async function checkAndReserveSend(
 
   const now = new Date();
   const retryAt = startOfNextUtcHour(now);
-  const key = buildRateKey(senderId, now);
-  // Keep counter through the next hour boundary with a small buffer.
-  const ttlSeconds = secondsUntil(retryAt, now) + 3600;
+  const { start, end } = utcHourBounds(now);
+  const windowKey = `email-rate:${senderId}:${formatUtcHourKey(now)}`;
 
-  const redis = getRedisClient();
-  const raw = (await redis.eval(
-    CHECK_AND_RESERVE_LUA,
-    1,
-    key,
-    String(hourlyLimit),
-    String(ttlSeconds),
-    String(retryAt.getTime()),
-  )) as [number | string, number | string, number | string, string];
+  const current = await prisma.email.count({
+    where: {
+      senderId,
+      ...(options?.emailId ? { id: { not: options.emailId } } : {}),
+      OR: [
+        {
+          status: EmailStatus.SENT,
+          sentAt: { gte: start, lt: end },
+        },
+        {
+          status: EmailStatus.PROCESSING,
+          updatedAt: { gte: start },
+        },
+      ],
+    },
+  });
 
-  const allowed = Number(raw[0]) === 1;
-  const current = Number(raw[1]);
-  const remaining = Number(raw[2]);
+  const allowed = current < hourlyLimit;
+  const remaining = Math.max(0, hourlyLimit - current - (allowed ? 1 : 0));
 
   const result: RateLimitResult = {
     allowed,
     remaining,
-    current,
+    current: allowed ? current + 1 : current,
     limit: hourlyLimit,
-    windowKey: key,
+    windowKey,
     ...(allowed ? {} : { retryAt }),
   };
 
   if (!allowed) {
-    // Best-effort Slack notify with Redis NX dedupe inside the Slack service.
-    // Must never affect email scheduling / rescheduling.
     void notifyHourlyLimitReached({
       senderId,
       userId: options?.userId,
@@ -113,7 +98,7 @@ export async function checkAndReserveSend(
       rateLimitRemaining: remaining,
       current,
       rescheduledAt: retryAt.toISOString(),
-      windowKey: key,
+      windowKey,
     });
   } else {
     logger.info('Hourly rate limit reserved', {
@@ -121,19 +106,30 @@ export async function checkAndReserveSend(
       emailId: options?.emailId,
       rateLimit: hourlyLimit,
       rateLimitRemaining: remaining,
-      current,
-      windowKey: key,
+      current: result.current,
+      windowKey,
     });
   }
 
   return result;
 }
 
-/**
- * Read-only peek at the current hourly counter (for tests/diagnostics).
- */
 export async function getHourlySendCount(senderId: string): Promise<number> {
-  const key = buildRateKey(senderId, new Date());
-  const value = await getRedisClient().get(key);
-  return value ? Number(value) : 0;
+  const now = new Date();
+  const { start, end } = utcHourBounds(now);
+  return prisma.email.count({
+    where: {
+      senderId,
+      OR: [
+        {
+          status: EmailStatus.SENT,
+          sentAt: { gte: start, lt: end },
+        },
+        {
+          status: EmailStatus.PROCESSING,
+          updatedAt: { gte: start },
+        },
+      ],
+    },
+  });
 }

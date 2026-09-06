@@ -2,11 +2,11 @@ import type { Request, Response } from 'express';
 import { EmailStatus } from '@prisma/client';
 import { env } from '../config/env.js';
 import { prisma } from '../db/prisma.js';
-import { searchEmails } from '../elasticsearch/email-search.service.js';
 import {
   createAndScheduleEmails,
   resolveScheduleDefaults,
 } from '../services/email-scheduler.service.js';
+import { searchEmails } from '../services/email-search.service.js';
 import {
   findOwnedSender,
   getOrCreateDefaultSender,
@@ -189,7 +189,6 @@ export async function scheduleEmailsHandler(
       },
       scheduled: scheduled.map((item) => ({
         emailId: item.emailId,
-        bullJobId: item.bullJobId,
         scheduledAt: item.scheduledAt.toISOString(),
       })),
     },
@@ -214,7 +213,6 @@ export async function getScheduledEmailsHandler(
       subject: true,
       scheduledAt: true,
       status: true,
-      bullJobId: true,
       sendDelayMs: true,
       hourlyLimit: true,
       createdAt: true,
@@ -237,7 +235,6 @@ export async function getScheduledEmailsHandler(
         subject: email.subject,
         scheduledAt: email.scheduledAt.toISOString(),
         status: email.status,
-        bullJobId: email.bullJobId,
         sendDelayMs: email.sendDelayMs,
         hourlyLimit: email.hourlyLimit,
         createdAt: email.createdAt.toISOString(),

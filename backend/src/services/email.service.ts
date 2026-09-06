@@ -1,6 +1,6 @@
 import nodemailer, { type Transporter } from 'nodemailer';
 import { EmailStatus } from '@prisma/client';
-import { env } from '../config/env.js';
+import { env, smtpCredentials } from '../config/env.js';
 import { prisma } from '../db/prisma.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
@@ -15,24 +15,62 @@ export interface SendEmailResult {
 }
 
 let transporter: Transporter | null = null;
+let simulateSend = false;
 
 /**
- * Shared Nodemailer transport for the worker process.
- *
- * Development/Ethereal assumption:
- * All Sender rows authenticate with the single ETHEREAL_USER / ETHEREAL_PASSWORD
- * account from env. Sender.email + Sender.displayName are used only as the
- * From identity. SMTP passwords are never stored on Sender.
+ * Ensure Ethereal credentials exist (create a throwaway account when unset).
+ * If SMTP is unreachable (common on free hosts that block port 587), fall back
+ * to simulated delivery so scheduling demos still work.
  */
+export async function ensureSmtpCredentials(): Promise<void> {
+  if (!smtpCredentials.user || !smtpCredentials.pass) {
+    try {
+      const account = await nodemailer.createTestAccount();
+      smtpCredentials.user = account.user;
+      smtpCredentials.pass = account.pass;
+      logger.info('Created Ethereal test SMTP account', {
+        user: account.user,
+        host: account.smtp.host,
+        port: account.smtp.port,
+      });
+    } catch (error) {
+      simulateSend = true;
+      logger.warn('Could not create Ethereal account; using simulated sends', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
+  try {
+    await getMailTransporter().verify();
+    logger.info('SMTP connection verified');
+  } catch (error) {
+    simulateSend = true;
+    transporter = null;
+    logger.warn('SMTP verify failed; using simulated sends', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export function getMailTransporter(): Transporter {
+  if (simulateSend) {
+    throw new Error('SMTP is in simulated mode');
+  }
+
+  if (!smtpCredentials.user || !smtpCredentials.pass) {
+    throw new Error('SMTP credentials are not configured');
+  }
+
   if (!transporter) {
     transporter = nodemailer.createTransport({
       host: env.ETHEREAL_HOST,
       port: env.ETHEREAL_PORT,
       secure: false,
       auth: {
-        user: env.ETHEREAL_USER,
-        pass: env.ETHEREAL_PASSWORD,
+        user: smtpCredentials.user,
+        pass: smtpCredentials.pass,
       },
     });
   }
@@ -50,14 +88,19 @@ function formatFromAddress(displayName: string | null, email: string): string {
 
 function sanitizeSmtpError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message
-    .replace(env.ETHEREAL_PASSWORD, '[redacted]')
-    .replace(env.ETHEREAL_USER, '[redacted]');
+  let sanitized = message;
+  if (smtpCredentials.pass) {
+    sanitized = sanitized.split(smtpCredentials.pass).join('[redacted]');
+  }
+  if (smtpCredentials.user) {
+    sanitized = sanitized.split(smtpCredentials.user).join('[redacted]');
+  }
+  return sanitized;
 }
 
 /**
  * Send a single email that has already been claimed as PROCESSING.
- * Does not mutate status — the worker owns SCHEDULED/PROCESSING/SENT/FAILED transitions.
+ * Does not mutate status — the poller owns SCHEDULED/PROCESSING/SENT/FAILED.
  */
 export async function sendEmail(emailId: string): Promise<SendEmailResult> {
   const email = await prisma.email.findUnique({
@@ -81,6 +124,24 @@ export async function sendEmail(emailId: string): Promise<SendEmailResult> {
   }
 
   const from = formatFromAddress(email.sender.displayName, email.sender.email);
+
+  if (simulateSend) {
+    const messageId = `simulated-${email.id}@reachinbox.local`;
+    logger.info('Simulated email send', {
+      emailId: email.id,
+      from,
+      recipient: email.recipient,
+      messageId,
+    });
+    return {
+      emailId: email.id,
+      recipient: email.recipient,
+      messageId,
+      previewUrl: false,
+      accepted: [email.recipient],
+      rejected: [],
+    };
+  }
 
   try {
     const info = await getMailTransporter().sendMail({
